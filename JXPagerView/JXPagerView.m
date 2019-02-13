@@ -13,22 +13,16 @@
 @property (nonatomic, strong) JXPagerMainTableView *mainTableView;
 @property (nonatomic, strong) JXPagerListContainerView *listContainerView;
 @property (nonatomic, strong) UIScrollView *currentScrollingListView;
-@property (nonatomic, strong) id<JXPagerViewListViewDelegate> currentList;
-@property (nonatomic, strong) NSMutableDictionary <NSNumber *, id<JXPagerViewListViewDelegate>> *validListDict; 
+@property (nonatomic, strong) id<JXPagerViewListViewDelegate> currentListView;
+
 @end
 
 @implementation JXPagerView
-
-- (void)dealloc
-{
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
-}
 
 - (instancetype)initWithDelegate:(id<JXPagerViewDelegate>)delegate {
     self = [super initWithFrame:CGRectZero];
     if (self) {
         _delegate = delegate;
-        _validListDict = [NSMutableDictionary dictionary];
         [self initializeViews];
     }
     return self;
@@ -39,7 +33,6 @@
     self.mainTableView.showsVerticalScrollIndicator = NO;
     self.mainTableView.showsHorizontalScrollIndicator = NO;
     self.mainTableView.separatorStyle = UITableViewCellSeparatorStyleNone;
-    self.mainTableView.scrollsToTop = NO;
     self.mainTableView.dataSource = self;
     self.mainTableView.delegate = self;
     self.mainTableView.tableHeaderView = [self.delegate tableHeaderViewInPagerView:self];
@@ -52,9 +45,7 @@
     _listContainerView = [[JXPagerListContainerView alloc] initWithDelegate:self];
     self.listContainerView.mainTableView = self.mainTableView;
 
-    self.isListHorizontalScrollEnabled = YES;
-
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(deviceOrientationDidChangeNotification:) name:UIDeviceOrientationDidChangeNotification object:nil];
+    [self configListViewDidScrollCallback];
 }
 
 - (void)layoutSubviews {
@@ -63,22 +54,10 @@
     self.mainTableView.frame = self.bounds;
 }
 
-- (void)setIsListHorizontalScrollEnabled:(BOOL)isListHorizontalScrollEnabled {
-    _isListHorizontalScrollEnabled = isListHorizontalScrollEnabled;
-
-    self.listContainerView.collectionView.scrollEnabled = isListHorizontalScrollEnabled;
-}
-
 - (void)reloadData {
-    self.currentList = nil;
+    self.currentListView = nil;
     self.currentScrollingListView = nil;
-
-    for (id<JXPagerViewListViewDelegate> list in self.validListDict.allValues) {
-        [list.listView removeFromSuperview];
-    }
-    [_validListDict removeAllObjects];
-
-    self.mainTableView.tableHeaderView = [self.delegate tableHeaderViewInPagerView:self];
+    [self configListViewDidScrollCallback];
     [self.mainTableView reloadData];
     [self.listContainerView reloadData];
 }
@@ -86,8 +65,8 @@
 - (void)preferredProcessListViewDidScroll:(UIScrollView *)scrollView {
     if (self.mainTableView.contentOffset.y < [self.delegate tableHeaderViewHeightInPagerView:self]) {
         //mainTableView的header还没有消失，让listScrollView一直为0
-        if (self.currentList && [self.currentList respondsToSelector:@selector(listScrollViewWillResetContentOffset)]) {
-            [self.currentList listScrollViewWillResetContentOffset];
+        if (self.currentListView && [self.currentListView respondsToSelector:@selector(listScrollViewWillResetContentOffset)]) {
+            [self.currentListView listScrollViewWillResetContentOffset];
         }
         scrollView.contentOffset = CGPointZero;
         scrollView.showsVerticalScrollIndicator = NO;
@@ -106,11 +85,12 @@
 
     if (scrollView.contentOffset.y < [self.delegate tableHeaderViewHeightInPagerView:self]) {
         //mainTableView已经显示了header，listView的contentOffset需要重置
-        for (id<JXPagerViewListViewDelegate> list in self.validListDict.allValues) {
-            if ([list respondsToSelector:@selector(listScrollViewWillResetContentOffset)]) {
-                [list listScrollViewWillResetContentOffset];
+        NSArray *listViews = [self.delegate listViewsInPagerView:self];
+        for (id<JXPagerViewListViewDelegate> listView in listViews) {
+            if ([listView respondsToSelector:@selector(listScrollViewWillResetContentOffset)]) {
+                [listView listScrollViewWillResetContentOffset];
             }
-            [list listScrollView].contentOffset = CGPointZero;
+            [listView listScrollView].contentOffset = CGPointZero;
         }
     }
 
@@ -122,16 +102,21 @@
 
 #pragma mark - Private
 
+- (void)configListViewDidScrollCallback {
+    NSArray *listViews = [self.delegate listViewsInPagerView:self];
+    for (id<JXPagerViewListViewDelegate> listView in listViews) {
+        __weak typeof(self)weakSelf = self;
+        [listView listViewDidScrollCallback:^(UIScrollView *scrollView) {
+            weakSelf.currentListView = listView;
+            [weakSelf listViewDidScroll:scrollView];
+        }];
+    }
+}
+
 - (void)listViewDidScroll:(UIScrollView *)scrollView {
     self.currentScrollingListView = scrollView;
 
     [self preferredProcessListViewDidScroll:scrollView];
-}
-
-- (void)deviceOrientationDidChangeNotification:(NSNotification *)notification {
-    [self.mainTableView reloadData];
-    [self.listContainerView deviceOrientationDidChanged];
-    [self.listContainerView reloadData];
 }
 
 #pragma mark - UITableViewDataSource, UITableViewDelegate
@@ -149,8 +134,10 @@
     for (UIView *view in cell.contentView.subviews) {
         [view removeFromSuperview];
     }
-    self.listContainerView.frame = cell.bounds;
+    self.listContainerView.frame = cell.contentView.bounds;
     [cell.contentView addSubview:self.listContainerView];
+    [self.listContainerView setNeedsLayout];
+    [self.listContainerView layoutIfNeeded];
     return cell;
 }
 
@@ -177,7 +164,7 @@
         [self.delegate mainTableViewDidScroll:scrollView];
     }
 
-    if (scrollView.isTracking && self.isListHorizontalScrollEnabled) {
+    if (scrollView.isTracking) {
         self.listContainerView.collectionView.scrollEnabled = NO;
     }
 
@@ -185,54 +172,32 @@
 }
 
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
-    if (self.isListHorizontalScrollEnabled) {
-        self.listContainerView.collectionView.scrollEnabled = YES;
-    }
+    self.listContainerView.collectionView.scrollEnabled = YES;
 }
 
 - (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
-    if (self.isListHorizontalScrollEnabled) {
-        self.listContainerView.collectionView.scrollEnabled = YES;
-    }
+    self.listContainerView.collectionView.scrollEnabled = YES;
 }
 
 - (void)scrollViewDidEndScrollingAnimation:(UIScrollView *)scrollView {
-    if (self.isListHorizontalScrollEnabled) {
-        self.listContainerView.collectionView.scrollEnabled = YES;
-    }
+    self.listContainerView.collectionView.scrollEnabled = YES;
 }
 
 #pragma mark - JXPagingListContainerViewDelegate
 
 - (NSInteger)numberOfRowsInListContainerView:(JXPagerListContainerView *)listContainerView {
-    return [self.delegate numberOfListsInPagerView:self];
+    NSArray *listViews = [self.delegate listViewsInPagerView:self];
+    return listViews.count;
 }
 
 - (UIView *)listContainerView:(JXPagerListContainerView *)listContainerView listViewInRow:(NSInteger)row {
-    id<JXPagerViewListViewDelegate> list = self.validListDict[@(row)];
-    if (list == nil) {
-        list = [self.delegate pagerView:self initListAtIndex:row];
-        __weak typeof(self)weakSelf = self;
-        __weak typeof(id<JXPagerViewListViewDelegate>) weakList = list;
-        [list listViewDidScrollCallback:^(UIScrollView *scrollView) {
-            weakSelf.currentList = weakList;
-            [weakSelf listViewDidScroll:scrollView];
-        }];
-        _validListDict[@(row)] = list;
-    }
-    for (id<JXPagerViewListViewDelegate> listItem in self.validListDict.allValues) {
-        if (listItem == list) {
-            [listItem listScrollView].scrollsToTop = YES;
-        }else {
-            [listItem listScrollView].scrollsToTop = NO;
-        }
-    }
-
-    return [list listView];
+    NSArray *listViews = [self.delegate listViewsInPagerView:self];
+    return [listViews[row] listView];
 }
 
 - (void)listContainerView:(JXPagerListContainerView *)listContainerView willDisplayCellAtRow:(NSInteger)row {
-    self.currentScrollingListView = [self.validListDict[@(row)] listScrollView];
+    NSArray *listViews = [self.delegate listViewsInPagerView:self];
+    self.currentScrollingListView = [listViews[row] listScrollView];
 }
 
 @end
